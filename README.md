@@ -53,6 +53,19 @@ when a notion needs more practice. Each sheet ends with the matching part.
   the API map domain refusals to HTTP statuses in one handler. Pydantic request
   models validate admin bodies; successful changes are atomically saved.
 
+## Package and storage (Step 11)
+
+The application lives in `src/deauville/`: `festival.py` contains the domain
+model, `storage.py` defines the storage interface and JSON/in-memory
+implementations, `api.py` exposes the HTTP routes, and `cli.py` provides the
+`deauville` command. The API and CLI receive a `Storage`; festival rules do not
+depend on JSON or file paths.
+
+Run `uv sync`, then use `uv run deauville programme 2027-06-11` or
+`uv run deauville serve`. Both commands accept `--data PATH` before or after
+the subcommand; the default is `data/festival.json`. Run `uv run pytest` for
+the tests and `uv build` to build the wheel.
+
 Each block README lists its steps and side examples: [B1](B1/README.md),
 [B2](B2/README.md), [B3](B3/README.md), [B4](B4/README.md),
 [B5](B5/README.md).

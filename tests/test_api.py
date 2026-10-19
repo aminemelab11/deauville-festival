@@ -6,11 +6,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 root = str(Path(__file__).parent.parent)
-sys.path.insert(0, root)
+sys.path.insert(0, str(Path(root) / "src"))
 try:
-    import api as api_module
-    from api import app
-    from festival import (
+    import deauville.api as api_module
+    from deauville.api import app
+    from deauville.festival import (
         Artist,
         Festival,
         Lineup,
@@ -18,23 +18,26 @@ try:
         SoloShow,
         Venue,
         Workshop,
-        load_festival,
     )
+    from deauville.storage import JsonFileStorage, MemoryStorage
 finally:
-    sys.path.remove(root)
+    sys.path.remove(str(Path(root) / "src"))
 
 client = TestClient(app)
 
 
 @pytest.fixture
 def writable_festival(monkeypatch: pytest.MonkeyPatch) -> tuple[Festival, list[dict]]:
-    festival = load_festival()
+    festival = JsonFileStorage(Path("data/festival.json")).load()
     saved_data = []
 
-    monkeypatch.setattr(api_module, "load_festival", lambda: festival)
-    monkeypatch.setattr(
-        api_module, "save_festival", lambda value: saved_data.append(value.to_data())
-    )
+    class RecordingStorage(MemoryStorage):
+        def save(self, value: Festival) -> None:
+            super().save(value)
+            saved_data.append(value.to_data())
+
+    storage = RecordingStorage(festival)
+    monkeypatch.setattr(api_module.app.state, "storage", storage)
     return festival, saved_data
 
 
@@ -96,7 +99,7 @@ def test_artists_route_returns_contract_fields_sorted_by_slug() -> None:
 
 
 def test_festival_loads_data_as_objects() -> None:
-    festival = load_festival()
+    festival = JsonFileStorage(Path("data/festival.json")).load()
 
     assert isinstance(festival, Festival)
     assert all(isinstance(venue, Venue) for venue in festival.venues)
@@ -422,6 +425,11 @@ def test_admin_changes_are_persisted_to_the_data_file(
     original_data = Path(__file__).parent.parent / "data" / "festival.json"
     (data_directory / "festival.json").write_bytes(original_data.read_bytes())
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        api_module.app.state,
+        "storage",
+        JsonFileStorage(Path("data/festival.json")),
+    )
 
     response = client.post(
         "/api/artists",
@@ -443,6 +451,11 @@ def test_invalid_json_data_file_returns_clear_server_error(
     data_directory.mkdir()
     (data_directory / "festival.json").write_text("{", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        api_module.app.state,
+        "storage",
+        JsonFileStorage(Path("data/festival.json")),
+    )
 
     response = client.get("/api/festival")
 

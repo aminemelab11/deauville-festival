@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import json
 import unicodedata
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from pathlib import Path
-from tempfile import NamedTemporaryFile
 from typing import ClassVar
 
 
@@ -624,33 +621,6 @@ def festival_from_data(data: dict) -> Festival:
     return festival
 
 
-def load_festival() -> Festival:
-    with Path("data/festival.json").open(encoding="utf-8") as file:
-        data = json.load(file)
-    try:
-        return festival_from_data(data)
-    except FestivalError as error:
-        raise DataError(f"The festival data is invalid: {error}") from error
-    except (KeyError, TypeError, ValueError) as error:
-        raise DataError("The festival data has an invalid structure.") from error
-
-
-def save_festival(festival: Festival) -> None:
-    path = Path("data/festival.json")
-    temporary_path: Path | None = None
-    try:
-        with NamedTemporaryFile(
-            "w", encoding="utf-8", dir=path.parent, delete=False
-        ) as file:
-            temporary_path = Path(file.name)
-            json.dump(festival.to_data(), file, ensure_ascii=False, indent=2)
-            file.write("\n")
-        temporary_path.replace(path)
-    finally:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
-
-
 def start_of(performance: Performance) -> datetime:
     return performance.start
 
@@ -800,11 +770,9 @@ def add_performance(festival: Festival) -> None:
         min_age=0,
     )
     festival.add_performance(performance)
-    save_festival(festival)
     print(f"Added: {performance.id}")
 
 
 def cancel_performance(festival: Festival, requested_id: str) -> None:
     performance = festival.cancel_performance(requested_id)
-    save_festival(festival)
     print(f"Cancelled: {performance.title}")

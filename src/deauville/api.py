@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
-from festival import (
+from deauville.festival import (
     Artist,
     ConflictError,
     DataError,
@@ -18,12 +18,12 @@ from festival import (
     InvalidValueError,
     NotFoundError,
     Performance,
-    load_festival,
     performance_from_data,
-    save_festival,
 )
+from deauville.storage import JsonFileStorage, Storage
 
 app = FastAPI()
+app.state.storage = JsonFileStorage(Path("data/festival.json"))
 logger = logging.getLogger(__name__)
 
 
@@ -119,9 +119,15 @@ def make_performance(
     )
 
 
+def create_app(storage: Storage | None = None) -> FastAPI:
+    if storage is not None:
+        app.state.storage = storage
+    return app
+
+
 @app.get("/api/festival")
-def get_festival() -> dict:
-    festival = load_festival()
+def get_festival(request: Request) -> dict:
+    festival = request.app.state.storage.load()
     days = [
         (festival.first_day + timedelta(days=offset)).isoformat()
         for offset in range((festival.last_day - festival.first_day).days + 1)
@@ -136,21 +142,21 @@ def get_festival() -> dict:
 
 
 @app.get("/api/venues")
-def list_venues() -> list[dict]:
-    festival = load_festival()
+def list_venues(request: Request) -> list[dict]:
+    festival = request.app.state.storage.load()
     return [venue.to_view() for venue in festival.venues]
 
 
 @app.get("/api/artists")
-def list_artists() -> list[dict]:
-    festival = load_festival()
+def list_artists(request: Request) -> list[dict]:
+    festival = request.app.state.storage.load()
     artists = sorted(festival.artists, key=lambda artist: artist.slug)
     return [artist.to_view() for artist in artists]
 
 
 @app.get("/api/artists/{artist_slug}")
-def get_artist(artist_slug: str) -> dict:
-    festival = load_festival()
+def get_artist(request: Request, artist_slug: str) -> dict:
+    festival = request.app.state.storage.load()
     artist = festival.get_artist(artist_slug)
     if artist is None:
         raise HTTPException(status_code=404, detail=f"No artist '{artist_slug}'.")
@@ -164,8 +170,10 @@ def get_artist(artist_slug: str) -> dict:
 
 
 @app.get("/api/programme")
-def get_programme(day: date | None = None, venue: str | None = None) -> list[dict]:
-    festival = load_festival()
+def get_programme(
+    request: Request, day: date | None = None, venue: str | None = None
+) -> list[dict]:
+    festival = request.app.state.storage.load()
     if venue is not None and festival.get_venue(venue) is None:
         raise HTTPException(status_code=404, detail=f"No venue '{venue}'.")
 
@@ -184,8 +192,8 @@ def get_programme(day: date | None = None, venue: str | None = None) -> list[dic
 
 
 @app.get("/api/performances/{performance_id}")
-def get_performance(performance_id: str) -> dict:
-    festival = load_festival()
+def get_performance(request: Request, performance_id: str) -> dict:
+    festival = request.app.state.storage.load()
     performance = festival.get_performance(performance_id)
     if performance is None:
         raise HTTPException(
@@ -196,8 +204,8 @@ def get_performance(performance_id: str) -> dict:
 
 
 @app.get("/api/now")
-def get_now(at: datetime | None = None) -> dict:
-    festival = load_festival()
+def get_now(request: Request, at: datetime | None = None) -> dict:
+    festival = request.app.state.storage.load()
     moment = at or datetime.now()
     return {
         "at": moment.isoformat(timespec="minutes"),
@@ -209,45 +217,54 @@ def get_now(at: datetime | None = None) -> dict:
 
 
 @app.post("/api/artists", status_code=201)
-def create_artist(request: ArtistRequest) -> dict:
-    festival = load_festival()
-    artist = Artist(**request.model_dump())
+def create_artist(body: ArtistRequest, request: Request) -> dict:
+    storage: Storage = request.app.state.storage
+    festival = storage.load()
+    artist = Artist(**body.model_dump())
     festival.add_artist(artist)
-    save_festival(festival)
+    storage.save(festival)
     return artist.to_view()
 
 
 @app.post("/api/performances", status_code=201)
-def create_performance(request: PerformanceRequestBody) -> dict:
-    festival = load_festival()
-    performance = make_performance(festival, request)
+def create_performance(body: PerformanceRequestBody, request: Request) -> dict:
+    storage: Storage = request.app.state.storage
+    festival = storage.load()
+    performance = make_performance(festival, body)
     festival.add_performance(performance)
-    save_festival(festival)
+    storage.save(festival)
     return performance.to_view()
 
 
 @app.put("/api/performances/{performance_id}")
-def update_performance(performance_id: str, request: PerformanceRequestBody) -> dict:
-    festival = load_festival()
-    performance = make_performance(festival, request)
+def update_performance(
+    performance_id: str, body: PerformanceRequestBody, request: Request
+) -> dict:
+    storage: Storage = request.app.state.storage
+    festival = storage.load()
+    performance = make_performance(festival, body)
     updated = festival.update_performance(performance_id, performance)
-    save_festival(festival)
+    storage.save(festival)
     return updated.to_view()
 
 
 @app.delete("/api/performances/{performance_id}", status_code=204)
-def delete_performance(performance_id: str) -> Response:
-    festival = load_festival()
+def delete_performance(performance_id: str, request: Request) -> Response:
+    storage: Storage = request.app.state.storage
+    festival = storage.load()
     festival.cancel_performance(performance_id)
-    save_festival(festival)
+    storage.save(festival)
     return Response(status_code=204)
 
 
 @app.post("/api/performances/{performance_id}/participants", status_code=201)
-def create_participant(performance_id: str, request: ParticipantRequest) -> dict:
-    festival = load_festival()
-    workshop = festival.register_participant(performance_id, request.name)
-    save_festival(festival)
+def create_participant(
+    performance_id: str, body: ParticipantRequest, request: Request
+) -> dict:
+    storage: Storage = request.app.state.storage
+    festival = storage.load()
+    workshop = festival.register_participant(performance_id, body.name)
+    storage.save(festival)
     return workshop.to_view()
 
 

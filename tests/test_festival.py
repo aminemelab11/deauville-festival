@@ -5,9 +5,9 @@ from pathlib import Path
 import pytest
 
 root = str(Path(__file__).parent.parent)
-sys.path.insert(0, root)
+sys.path.insert(0, str(Path(root) / "src"))
 try:
-    from festival import (
+    from deauville.festival import (
         Artist,
         Festival,
         Lineup,
@@ -15,10 +15,10 @@ try:
         SoloShow,
         Venue,
         Workshop,
-        load_festival,
     )
+    from deauville.storage import JsonFileStorage
 finally:
-    sys.path.remove(root)
+    sys.path.remove(str(Path(root) / "src"))
 
 
 @pytest.fixture
@@ -318,7 +318,7 @@ def test_performance_is_abstract() -> None:
 
 
 def test_kind_specific_summaries_match_step_nine_contract() -> None:
-    festival = load_festival()
+    festival = JsonFileStorage(Path("data/festival.json")).load()
 
     assert (
         festival.get_performance("le-kiosque-2027-06-12-0100").summary()
