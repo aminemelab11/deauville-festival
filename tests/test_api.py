@@ -7,7 +7,16 @@ root = str(Path(__file__).parent.parent)
 sys.path.insert(0, root)
 try:
     from api import app
-    from festival import Artist, Festival, Performance, Venue, load_festival
+    from festival import (
+        Artist,
+        Festival,
+        Lineup,
+        Performance,
+        SoloShow,
+        Venue,
+        Workshop,
+        load_festival,
+    )
 finally:
     sys.path.remove(root)
 
@@ -80,6 +89,11 @@ def test_festival_loads_data_as_objects() -> None:
     assert all(
         isinstance(performance, Performance) for performance in festival.performances
     )
+    assert isinstance(
+        festival.get_performance("grand-casino-2027-06-11-2030"), SoloShow
+    )
+    assert isinstance(festival.get_performance("le-kiosque-2027-06-12-0100"), Lineup)
+    assert isinstance(festival.get_performance("la-cabane-2027-06-11-1030"), Workshop)
 
 
 def test_programme_route_returns_performance_views_and_filters() -> None:
@@ -175,6 +189,17 @@ def test_workshop_performance_view_reports_remaining_places() -> None:
     assert response.status_code == 200
     assert response.json()["places_left"] == 9
     assert response.json()["capacity"] == 12
+
+
+def test_solo_performance_view_includes_age_and_artist_fields() -> None:
+    response = client.get("/api/performances/theatre-des-planches-2027-06-11-2130")
+
+    assert response.status_code == 200
+    performance = response.json()
+    assert performance["kind"] == "solo"
+    assert performance["artist"] == "karim-benali"
+    assert performance["min_age"] == 16
+    assert performance["summary"] == "Karim Benali"
 
 
 def test_now_route_returns_active_and_next_three_performances() -> None:

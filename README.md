@@ -35,17 +35,20 @@ when a notion needs more practice. Each sheet ends with the matching part.
 | B5    | [12 The whole contract](B5/E12_full_contract.md)           | all of `API.md`, tested                                      |
 |       | [13 Ship it](B5/E13_ship.md)                               | a fresh clone runs; your README explains your structure      |
 
-## Project model (Step 07)
+## Project model (Steps 07-09)
 
 - `Venue` and `Artist` hold the fields loaded from the JSON file and compute
   their stable slugs from their names.
-- `Performance` holds a venue and its participating artists as objects. It
-  computes its end time, festival day, identifier, summary, and API view.
+- Abstract `Performance` holds the fields and calculations shared by every
+  show: end time, festival day, identifier, and common API view fields.
+  `SoloShow`, `Lineup`, and `Workshop` each provide their own artists, roles,
+  summary, kind-specific fields, and validation.
 - `Festival` owns the venue, artist, and private performance collections. Its
   methods are the only way to add or cancel performances, enforcing scheduling
   rules for both the CLI and API. It also provides lookups, ordered programme
-  queries, and "on stage now" results. The loader builds this object graph
-  from JSON so callers share the same computations and rules.
+  queries, and "on stage now" results. The JSON loader selects the performance
+  subclass from each record's `kind`, then builds the object graph shared by
+  the command line and API.
 
 Each block README lists its steps and side examples: [B1](B1/README.md),
 [B2](B2/README.md), [B3](B3/README.md), [B4](B4/README.md),

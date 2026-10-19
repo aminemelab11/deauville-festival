@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import unicodedata
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import ClassVar
 
 
 def slug(text: str) -> str:
@@ -58,21 +60,14 @@ class Artist:
         return self.slug == other.slug
 
 
-@dataclass
-class Performance:
-    kind: str
+@dataclass(kw_only=True)
+class Performance(ABC):
+    kind: ClassVar[str]
     title: str
     venue: Venue
     start: datetime
     duration_minutes: int
     description: str = ""
-    artist: Artist | None = None
-    min_age: int | None = None
-    host: Artist | None = None
-    acts: list[Artist] = field(default_factory=list)
-    teacher: Artist | None = None
-    max_participants: int | None = None
-    participants: list[str] = field(default_factory=list)
 
     def __lt__(self, other: Performance) -> bool:
         if not isinstance(other, Performance):
@@ -92,58 +87,33 @@ class Performance:
         return f"{self.venue.slug}-{self.start:%Y-%m-%d-%H%M}"
 
     @property
+    @abstractmethod
     def artists(self) -> list[Artist]:
-        if self.kind == "solo":
-            return [self.artist] if self.artist else []
-        if self.kind == "lineup":
-            return ([self.host] if self.host else []) + self.acts
-        if self.kind == "workshop":
-            return [self.teacher] if self.teacher else []
-        return []
+        raise NotImplementedError
 
     @property
     def capacity(self) -> int:
-        if self.kind == "workshop" and self.max_participants is not None:
-            return min(self.max_participants, self.venue.capacity)
         return self.venue.capacity
 
     @property
     def places_left(self) -> int | None:
-        if self.kind != "workshop" or self.max_participants is None:
-            return None
-        return max(0, self.capacity - len(self.participants))
+        return None
 
     def involves(self, artist: Artist) -> bool:
         return artist in self.artists
 
+    @abstractmethod
     def roles_for(self, artist: Artist) -> list[str]:
-        roles = []
-        if self.kind == "solo" and self.artist == artist:
-            roles.append("solo")
-        elif self.kind == "lineup":
-            if self.host == artist:
-                roles.append("host")
-            if artist in self.acts:
-                roles.append("act")
-        elif self.kind == "workshop" and self.teacher == artist:
-            roles.append("teacher")
-        return roles
+        raise NotImplementedError
 
+    @abstractmethod
     def summary(self) -> str:
-        if self.kind == "solo" and self.artist:
-            return f"with {self.artist.name}"
-        if self.kind == "lineup":
-            host = f"hosted by {self.host.name}" if self.host else "lineup"
-            acts = ", ".join(artist.name for artist in self.acts)
-            return f"{host}, with {acts}" if acts else host
-        if self.kind == "workshop" and self.teacher:
-            return f"taught by {self.teacher.name}"
-        return ""
+        raise NotImplementedError
 
     def to_view(self) -> dict:
         view = {
             "id": self.id,
-            "kind": self.kind,
+            "kind": type(self).kind,
             "title": self.title,
             "venue": self.venue.slug,
             "venue_name": self.venue.name,
@@ -158,51 +128,199 @@ class Performance:
                 {"slug": artist.slug, "name": artist.name} for artist in self.artists
             ],
         }
-        if self.kind == "solo":
-            view.update(
-                artist=self.artist.slug if self.artist else None,
-                min_age=self.min_age,
-            )
-        elif self.kind == "lineup":
-            view.update(
-                host=self.host.slug if self.host else None,
-                acts=[artist.slug for artist in self.acts],
-            )
-        elif self.kind == "workshop":
-            view.update(
-                teacher=self.teacher.slug if self.teacher else None,
-                max_participants=self.max_participants,
-                participants=self.participants.copy(),
-                places_left=self.places_left,
-            )
+        view.update(self._specific_view())
         return view
 
     def to_data(self) -> dict:
         performance = {
-            "kind": self.kind,
+            "kind": type(self).kind,
             "title": self.title,
             "venue": self.venue.slug,
             "start": self.start.isoformat(timespec="minutes"),
             "duration_minutes": self.duration_minutes,
             "description": self.description,
         }
-        if self.kind == "solo":
-            performance.update(
-                artist=self.artist.slug if self.artist else "",
-                min_age=self.min_age if self.min_age is not None else 0,
-            )
-        elif self.kind == "lineup":
-            performance.update(
-                host=self.host.slug if self.host else "",
-                acts=[artist.slug for artist in self.acts],
-            )
-        elif self.kind == "workshop":
-            performance.update(
-                teacher=self.teacher.slug if self.teacher else "",
-                max_participants=self.max_participants,
-                participants=self.participants.copy(),
-            )
+        performance.update(self._specific_data())
         return performance
+
+    @abstractmethod
+    def _specific_view(self) -> dict:
+        raise NotImplementedError
+
+    @abstractmethod
+    def _specific_data(self) -> dict:
+        raise NotImplementedError
+
+    @classmethod
+    @abstractmethod
+    def from_data(
+        cls, data: dict, venues: dict[str, Venue], artists: dict[str, Artist]
+    ) -> Performance:
+        raise NotImplementedError
+
+
+@dataclass(kw_only=True)
+class SoloShow(Performance):
+    kind: ClassVar[str] = "solo"
+    artist: Artist
+    min_age: int = 0
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.min_age <= 18:
+            raise ValueError("Minimum age must be between 0 and 18.")
+
+    @property
+    def artists(self) -> list[Artist]:
+        return [self.artist]
+
+    def roles_for(self, artist: Artist) -> list[str]:
+        return ["solo"] if self.artist == artist else []
+
+    def summary(self) -> str:
+        return self.artist.name
+
+    def _specific_view(self) -> dict:
+        return {"artist": self.artist.slug, "min_age": self.min_age}
+
+    def _specific_data(self) -> dict:
+        return {"artist": self.artist.slug, "min_age": self.min_age}
+
+    @classmethod
+    def from_data(
+        cls, data: dict, venues: dict[str, Venue], artists: dict[str, Artist]
+    ) -> SoloShow:
+        return cls(
+            title=data["title"],
+            venue=venues[data["venue"]],
+            start=datetime.fromisoformat(data["start"]),
+            duration_minutes=data["duration_minutes"],
+            description=data.get("description", ""),
+            artist=artists[data["artist"]],
+            min_age=data.get("min_age", 0),
+        )
+
+
+@dataclass(kw_only=True)
+class Lineup(Performance):
+    kind: ClassVar[str] = "lineup"
+    host: Artist
+    acts: list[Artist]
+
+    def __post_init__(self) -> None:
+        if len(self.acts) < 2:
+            raise ValueError("A lineup must have at least two acts.")
+        if len({artist.slug for artist in self.acts}) != len(self.acts):
+            raise ValueError("A lineup cannot include an act more than once.")
+        if self.host in self.acts:
+            raise ValueError("The lineup host cannot also be an act.")
+        minimum_duration = len(self.acts) * 10 + (len(self.acts) - 1) * 3
+        if self.duration_minutes < minimum_duration:
+            raise ValueError(
+                f"A lineup with {len(self.acts)} acts must last at least "
+                f"{minimum_duration} minutes."
+            )
+
+    @property
+    def artists(self) -> list[Artist]:
+        return [self.host, *self.acts]
+
+    def roles_for(self, artist: Artist) -> list[str]:
+        roles = []
+        if self.host == artist:
+            roles.append("host")
+        if artist in self.acts:
+            roles.append("act")
+        return roles
+
+    def summary(self) -> str:
+        acts = ", ".join(artist.name for artist in self.acts)
+        return f"hosted by {self.host.name}, with {acts}"
+
+    def _specific_view(self) -> dict:
+        return {
+            "host": self.host.slug,
+            "acts": [artist.slug for artist in self.acts],
+        }
+
+    def _specific_data(self) -> dict:
+        return self._specific_view()
+
+    @classmethod
+    def from_data(
+        cls, data: dict, venues: dict[str, Venue], artists: dict[str, Artist]
+    ) -> Lineup:
+        return cls(
+            title=data["title"],
+            venue=venues[data["venue"]],
+            start=datetime.fromisoformat(data["start"]),
+            duration_minutes=data["duration_minutes"],
+            description=data.get("description", ""),
+            host=artists[data["host"]],
+            acts=[artists[artist_slug] for artist_slug in data["acts"]],
+        )
+
+
+@dataclass(kw_only=True)
+class Workshop(Performance):
+    kind: ClassVar[str] = "workshop"
+    teacher: Artist
+    max_participants: int
+    participants: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.max_participants < 1:
+            raise ValueError("A workshop must have at least one place.")
+
+    @property
+    def artists(self) -> list[Artist]:
+        return [self.teacher]
+
+    @property
+    def capacity(self) -> int:
+        return min(self.max_participants, self.venue.capacity)
+
+    @property
+    def places_left(self) -> int:
+        return max(0, self.capacity - len(self.participants))
+
+    def roles_for(self, artist: Artist) -> list[str]:
+        return ["teacher"] if self.teacher == artist else []
+
+    def summary(self) -> str:
+        return (
+            f"with {self.teacher.name}, "
+            f"{len(self.participants)}/{self.capacity} places taken"
+        )
+
+    def _specific_view(self) -> dict:
+        return {
+            "teacher": self.teacher.slug,
+            "max_participants": self.max_participants,
+            "participants": self.participants.copy(),
+            "places_left": self.places_left,
+        }
+
+    def _specific_data(self) -> dict:
+        return {
+            "teacher": self.teacher.slug,
+            "max_participants": self.max_participants,
+            "participants": self.participants.copy(),
+        }
+
+    @classmethod
+    def from_data(
+        cls, data: dict, venues: dict[str, Venue], artists: dict[str, Artist]
+    ) -> Workshop:
+        return cls(
+            title=data["title"],
+            venue=venues[data["venue"]],
+            start=datetime.fromisoformat(data["start"]),
+            duration_minutes=data["duration_minutes"],
+            description=data.get("description", ""),
+            teacher=artists[data["teacher"]],
+            max_participants=data["max_participants"],
+            participants=data.get("participants", []).copy(),
+        )
 
 
 @dataclass
@@ -351,26 +469,12 @@ class Festival:
 def performance_from_data(
     data: dict, venues: dict[str, Venue], artists: dict[str, Artist]
 ) -> Performance:
-    kind = data["kind"]
-    performance = Performance(
-        kind=kind,
-        title=data["title"],
-        venue=venues[data["venue"]],
-        start=datetime.fromisoformat(data["start"]),
-        duration_minutes=data["duration_minutes"],
-        description=data.get("description", ""),
-    )
-    if kind == "solo":
-        performance.artist = artists[data["artist"]]
-        performance.min_age = data.get("min_age", 0)
-    elif kind == "lineup":
-        performance.host = artists[data["host"]]
-        performance.acts = [artists[artist_slug] for artist_slug in data["acts"]]
-    elif kind == "workshop":
-        performance.teacher = artists[data["teacher"]]
-        performance.max_participants = data["max_participants"]
-        performance.participants = data.get("participants", []).copy()
-    return performance
+    performance_types: dict[str, type[Performance]] = {
+        "solo": SoloShow,
+        "lineup": Lineup,
+        "workshop": Workshop,
+    }
+    return performance_types[data["kind"]].from_data(data, venues, artists)
 
 
 def festival_from_data(data: dict) -> Festival:
@@ -541,8 +645,7 @@ def add_performance(festival: Festival) -> None:
     artist = festival.get_artist(artist_slug)
     if artist is None:
         raise ValueError(f"Unknown artist '{artist_slug}'.")
-    performance = Performance(
-        kind="solo",
+    performance = SoloShow(
         title=title,
         venue=venue,
         start=parse_moment(start_text),
