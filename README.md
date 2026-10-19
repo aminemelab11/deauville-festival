@@ -35,6 +35,16 @@ when a notion needs more practice. Each sheet ends with the matching part.
 | B5    | [12 The whole contract](B5/E12_full_contract.md)           | all of `API.md`, tested                                      |
 |       | [13 Ship it](B5/E13_ship.md)                               | a fresh clone runs; your README explains your structure      |
 
+## Project model (Step 07)
+
+- `Venue` and `Artist` hold the fields loaded from the JSON file and compute
+  their stable slugs from their names.
+- `Performance` holds a venue and its participating artists as objects. It
+  computes its end time, festival day, identifier, summary, and API view.
+- `Festival` groups the festival dates, venues, artists, and performances. It
+  provides lookups and ordered programme queries. The loader builds this object
+  graph from JSON so the command line and API share the same computed values.
+
 Each block README lists its steps and side examples: [B1](B1/README.md),
 [B2](B2/README.md), [B3](B3/README.md), [B4](B4/README.md),
 [B5](B5/README.md).
