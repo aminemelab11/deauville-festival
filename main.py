@@ -2,6 +2,7 @@ import json
 import sys
 
 from festival import (
+    FestivalError,
     add_performance,
     cancel_performance,
     load_festival,
@@ -61,7 +62,7 @@ def main() -> None:
         print(f"Error: Invalid JSON data: {error.msg}.")
         sys.exit(1)
 
-    except ValueError as error:
+    except FestivalError as error:
         print(f"Error: {error}")
         sys.exit(1)
 

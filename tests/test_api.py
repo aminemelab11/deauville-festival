@@ -1,11 +1,14 @@
+import json
 import sys
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 root = str(Path(__file__).parent.parent)
 sys.path.insert(0, root)
 try:
+    import api as api_module
     from api import app
     from festival import (
         Artist,
@@ -21,6 +24,18 @@ finally:
     sys.path.remove(root)
 
 client = TestClient(app)
+
+
+@pytest.fixture
+def writable_festival(monkeypatch: pytest.MonkeyPatch) -> tuple[Festival, list[dict]]:
+    festival = load_festival()
+    saved_data = []
+
+    monkeypatch.setattr(api_module, "load_festival", lambda: festival)
+    monkeypatch.setattr(
+        api_module, "save_festival", lambda value: saved_data.append(value.to_data())
+    )
+    return festival, saved_data
 
 
 def test_homepage_serves_static_site() -> None:
@@ -200,6 +215,241 @@ def test_solo_performance_view_includes_age_and_artist_fields() -> None:
     assert performance["artist"] == "karim-benali"
     assert performance["min_age"] == 16
     assert performance["summary"] == "Karim Benali"
+
+
+def test_admin_adds_artist_and_rejects_duplicate_slug(
+    writable_festival: tuple[Festival, list[dict]],
+) -> None:
+    festival, saved_data = writable_festival
+
+    created = client.post(
+        "/api/artists",
+        json={"name": " Zoé Tanguy ", "bio": "New artist."},
+    )
+    duplicate = client.post("/api/artists", json={"name": "zoe tanguy"})
+
+    assert created.status_code == 201
+    assert created.json()["name"] == "Zoé Tanguy"
+    assert duplicate.status_code == 409
+    assert duplicate.json() == {
+        "detail": "An artist named 'zoe tanguy' already exists."
+    }
+    assert len(festival.artists) == 13
+    assert len(saved_data) == 1
+    assert saved_data[0]["artists"][-1]["name"] == "Zoé Tanguy"
+
+
+def test_admin_schedules_performance_and_rejects_busy_venue(
+    writable_festival: tuple[Festival, list[dict]],
+) -> None:
+    festival, saved_data = writable_festival
+    body = {
+        "kind": "solo",
+        "title": "New Nora Show",
+        "venue": "le-kiosque",
+        "start": "2027-06-13T11:00",
+        "duration_minutes": 45,
+        "artist": "nora-lebrun",
+        "min_age": 0,
+    }
+
+    created = client.post("/api/performances", json=body)
+    conflict = client.post(
+        "/api/performances",
+        json={
+            **body,
+            "title": "Crowded Show",
+            "start": "2027-06-13T11:30",
+        },
+    )
+
+    assert created.status_code == 201
+    assert created.json()["id"] == "le-kiosque-2027-06-13-1100"
+    assert conflict.status_code == 409
+    assert "Le Kiosque is busy" in conflict.json()["detail"]
+    assert len(festival.performances) == 24
+    assert len(saved_data) == 1
+
+
+def test_admin_move_is_atomic_when_new_slot_is_busy(
+    writable_festival: tuple[Festival, list[dict]],
+) -> None:
+    festival, saved_data = writable_festival
+    body = {
+        "kind": "solo",
+        "title": "New Nora Show",
+        "venue": "le-kiosque",
+        "start": "2027-06-13T11:00",
+        "duration_minutes": 45,
+        "artist": "nora-lebrun",
+        "min_age": 0,
+    }
+    created = client.post("/api/performances", json=body)
+    old_id = created.json()["id"]
+    moved = client.put(
+        f"/api/performances/{old_id}",
+        json={**body, "start": "2027-06-13T12:00"},
+    )
+    refused_move = client.put(
+        f"/api/performances/{moved.json()['id']}",
+        json={**body, "start": "2027-06-13T15:00"},
+    )
+
+    assert moved.status_code == 200
+    assert moved.json()["id"] == "le-kiosque-2027-06-13-1200"
+    assert refused_move.status_code == 409
+    assert festival.get_performance(moved.json()["id"]).start.isoformat() == (
+        "2027-06-13T12:00:00"
+    )
+    assert festival.get_performance(old_id) is None
+    assert len(saved_data) == 2
+
+
+def test_admin_cancels_performance(
+    writable_festival: tuple[Festival, list[dict]],
+) -> None:
+    festival, saved_data = writable_festival
+    performance_id = festival.performances[0].id
+
+    response = client.delete(f"/api/performances/{performance_id}")
+
+    assert response.status_code == 204
+    assert response.content == b""
+    assert festival.get_performance(performance_id) is None
+    assert len(saved_data) == 1
+
+
+def test_admin_registers_participant_once(
+    writable_festival: tuple[Festival, list[dict]],
+) -> None:
+    festival, saved_data = writable_festival
+    workshop = next(
+        performance
+        for performance in festival.performances
+        if performance.title == "Stand-up Lab"
+    )
+
+    registered = client.post(
+        f"/api/performances/{workshop.id}/participants",
+        json={"name": " Camille Test "},
+    )
+    duplicate = client.post(
+        f"/api/performances/{workshop.id}/participants",
+        json={"name": "camille test"},
+    )
+
+    assert registered.status_code == 201
+    assert registered.json()["participants"][-1] == "Camille Test"
+    assert duplicate.status_code == 409
+    assert duplicate.json() == {"detail": "camille test is already registered."}
+    assert workshop.participants[-1] == "Camille Test"
+    assert len(saved_data) == 1
+
+
+def test_admin_rejects_invalid_performance_body(
+    writable_festival: tuple[Festival, list[dict]],
+) -> None:
+    festival, saved_data = writable_festival
+
+    response = client.post(
+        "/api/performances",
+        json={
+            "kind": "solo",
+            "title": "Invalid Age",
+            "venue": "le-kiosque",
+            "start": "2027-06-13T11:00",
+            "duration_minutes": 45,
+            "artist": "nora-lebrun",
+            "min_age": 19,
+        },
+    )
+
+    assert response.status_code == 422
+    assert len(festival.performances) == 23
+    assert saved_data == []
+
+
+def test_admin_maps_missing_references_rules_and_festival_dates(
+    writable_festival: tuple[Festival, list[dict]],
+) -> None:
+    festival, saved_data = writable_festival
+    body = {
+        "kind": "solo",
+        "title": "A New Show",
+        "venue": "unknown-venue",
+        "start": "2027-06-13T11:00",
+        "duration_minutes": 45,
+        "artist": "unknown-artist",
+    }
+
+    missing_venue = client.post("/api/performances", json=body)
+    missing_artist = client.post(
+        "/api/performances", json={**body, "venue": "le-kiosque"}
+    )
+    bad_date = client.post(
+        "/api/performances",
+        json={
+            **body,
+            "venue": "le-kiosque",
+            "start": "2027-06-09T11:00",
+            "artist": "nora-lebrun",
+        },
+    )
+    one_act = client.post(
+        "/api/performances",
+        json={
+            **body,
+            "kind": "lineup",
+            "venue": "le-kiosque",
+            "host": "tom-vasseur",
+            "acts": ["hugo-lemaire"],
+        },
+    )
+
+    assert missing_venue.status_code == 404
+    assert missing_artist.status_code == 404
+    assert bad_date.status_code == 409
+    assert one_act.status_code == 422
+    assert len(festival.performances) == 23
+    assert saved_data == []
+
+
+def test_admin_changes_are_persisted_to_the_data_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    data_directory = tmp_path / "data"
+    data_directory.mkdir()
+    original_data = Path(__file__).parent.parent / "data" / "festival.json"
+    (data_directory / "festival.json").write_bytes(original_data.read_bytes())
+    monkeypatch.chdir(tmp_path)
+
+    response = client.post(
+        "/api/artists",
+        json={"name": "Zoé Tanguy", "bio": "New artist."},
+    )
+
+    assert response.status_code == 201
+    persisted = json.loads((data_directory / "festival.json").read_text("utf-8"))
+    assert persisted["artists"][-1]["name"] == "Zoé Tanguy"
+    assert any(
+        artist["slug"] == "zoe-tanguy" for artist in client.get("/api/artists").json()
+    )
+
+
+def test_invalid_json_data_file_returns_clear_server_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    data_directory = tmp_path / "data"
+    data_directory.mkdir()
+    (data_directory / "festival.json").write_text("{", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    response = client.get("/api/festival")
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "detail": "The festival data file contains invalid JSON."
+    }
 
 
 def test_now_route_returns_active_and_next_three_performances() -> None:

@@ -6,7 +6,28 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import ClassVar
+
+
+class FestivalError(ValueError):
+    pass
+
+
+class NotFoundError(FestivalError):
+    pass
+
+
+class ConflictError(FestivalError):
+    pass
+
+
+class InvalidValueError(FestivalError):
+    pass
+
+
+class DataError(FestivalError):
+    pass
 
 
 def slug(text: str) -> str:
@@ -22,6 +43,13 @@ class Venue:
     name: str
     capacity: int
     address: str
+
+    def __post_init__(self) -> None:
+        self.name = self.name.strip()
+        if not self.name:
+            raise InvalidValueError("A venue name cannot be empty.")
+        if self.capacity < 1:
+            raise InvalidValueError("A venue must have at least one seat.")
 
     @property
     def slug(self) -> str:
@@ -42,6 +70,11 @@ class Artist:
     bio: str
     photo_url: str = ""
 
+    def __post_init__(self) -> None:
+        self.name = self.name.strip()
+        if not self.name:
+            raise InvalidValueError("An artist name cannot be empty.")
+
     @property
     def slug(self) -> str:
         return slug(self.name)
@@ -60,7 +93,7 @@ class Artist:
         return self.slug == other.slug
 
 
-@dataclass(kw_only=True)
+@dataclass(frozen=True, kw_only=True)
 class Performance(ABC):
     kind: ClassVar[str]
     title: str
@@ -68,6 +101,11 @@ class Performance(ABC):
     start: datetime
     duration_minutes: int
     description: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "title", self.title.strip())
+        if not self.title:
+            raise InvalidValueError("A performance title cannot be empty.")
 
     def __lt__(self, other: Performance) -> bool:
         if not isinstance(other, Performance):
@@ -159,15 +197,16 @@ class Performance(ABC):
         raise NotImplementedError
 
 
-@dataclass(kw_only=True)
+@dataclass(frozen=True, kw_only=True)
 class SoloShow(Performance):
     kind: ClassVar[str] = "solo"
     artist: Artist
     min_age: int = 0
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if not 0 <= self.min_age <= 18:
-            raise ValueError("Minimum age must be between 0 and 18.")
+            raise InvalidValueError("Minimum age must be between 0 and 18.")
 
     @property
     def artists(self) -> list[Artist]:
@@ -200,22 +239,24 @@ class SoloShow(Performance):
         )
 
 
-@dataclass(kw_only=True)
+@dataclass(frozen=True, kw_only=True)
 class Lineup(Performance):
     kind: ClassVar[str] = "lineup"
     host: Artist
-    acts: list[Artist]
+    acts: tuple[Artist, ...] | list[Artist]
 
     def __post_init__(self) -> None:
+        super().__post_init__()
+        object.__setattr__(self, "acts", tuple(self.acts))
         if len(self.acts) < 2:
-            raise ValueError("A lineup must have at least two acts.")
+            raise InvalidValueError("A lineup must have at least two acts.")
         if len({artist.slug for artist in self.acts}) != len(self.acts):
-            raise ValueError("A lineup cannot include an act more than once.")
+            raise InvalidValueError("A lineup cannot include an act more than once.")
         if self.host in self.acts:
-            raise ValueError("The lineup host cannot also be an act.")
+            raise InvalidValueError("The lineup host cannot also be an act.")
         minimum_duration = len(self.acts) * 10 + (len(self.acts) - 1) * 3
         if self.duration_minutes < minimum_duration:
-            raise ValueError(
+            raise InvalidValueError(
                 f"A lineup with {len(self.acts)} acts must last at least "
                 f"{minimum_duration} minutes."
             )
@@ -260,16 +301,25 @@ class Lineup(Performance):
         )
 
 
-@dataclass(kw_only=True)
+@dataclass(frozen=True, kw_only=True)
 class Workshop(Performance):
     kind: ClassVar[str] = "workshop"
     teacher: Artist
     max_participants: int
-    participants: list[str] = field(default_factory=list)
+    participants: tuple[str, ...] | list[str] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if self.max_participants < 1:
-            raise ValueError("A workshop must have at least one place.")
+            raise InvalidValueError("A workshop must have at least one place.")
+        participants = tuple(name.strip() for name in self.participants)
+        if any(not name for name in participants):
+            raise InvalidValueError("A participant name cannot be empty.")
+        if len({name.casefold() for name in participants}) != len(participants):
+            raise ConflictError("A participant cannot be registered more than once.")
+        object.__setattr__(self, "participants", participants)
+        if len(self.participants) > min(self.max_participants, self.venue.capacity):
+            raise ConflictError("The workshop is full.")
 
     @property
     def artists(self) -> list[Artist]:
@@ -292,11 +342,24 @@ class Workshop(Performance):
             f"{len(self.participants)}/{self.capacity} places taken"
         )
 
+    def register_participant(self, name: str) -> None:
+        name = name.strip()
+        if not name:
+            raise InvalidValueError("A participant name cannot be empty.")
+        if any(
+            participant.casefold() == name.casefold()
+            for participant in self.participants
+        ):
+            raise ConflictError(f"{name} is already registered.")
+        if self.places_left == 0:
+            raise ConflictError("The workshop is full.")
+        object.__setattr__(self, "participants", (*self.participants, name))
+
     def _specific_view(self) -> dict:
         return {
             "teacher": self.teacher.slug,
             "max_participants": self.max_participants,
-            "participants": self.participants.copy(),
+            "participants": list(self.participants),
             "places_left": self.places_left,
         }
 
@@ -304,7 +367,7 @@ class Workshop(Performance):
         return {
             "teacher": self.teacher.slug,
             "max_participants": self.max_participants,
-            "participants": self.participants.copy(),
+            "participants": list(self.participants),
         }
 
     @classmethod
@@ -323,14 +386,20 @@ class Workshop(Performance):
         )
 
 
-@dataclass
+@dataclass(frozen=True)
 class Festival:
     name: str
     first_day: date
     last_day: date
-    venues: list[Venue]
-    artists: list[Artist]
-    _performances: list[Performance] = field(default_factory=list, repr=False)
+    venues: tuple[Venue, ...] | list[Venue]
+    artists: tuple[Artist, ...] | list[Artist]
+    _performances: list[Performance] = field(
+        default_factory=list, init=False, repr=False
+    )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "venues", tuple(self.venues))
+        object.__setattr__(self, "artists", tuple(self.artists))
 
     @property
     def performances(self) -> tuple[Performance, ...]:
@@ -401,43 +470,78 @@ class Festival:
     def add_performance(self, performance: Performance) -> None:
         self._validate_performance(performance)
         if self.get_performance(performance.id) is not None:
-            raise ValueError(f"A performance already exists at '{performance.id}'.")
+            raise ConflictError(f"A performance already exists at '{performance.id}'.")
         self._performances.append(performance)
+
+    def update_performance(
+        self, performance_id: str, replacement: Performance
+    ) -> Performance:
+        existing = self.get_performance(performance_id)
+        if existing is None:
+            raise NotFoundError(f"Unknown performance '{performance_id}'.")
+        self._validate_performance(replacement, excluding=existing)
+        collision = self.get_performance(replacement.id)
+        if collision is not None and collision is not existing:
+            raise ConflictError(f"A performance already exists at '{replacement.id}'.")
+        self._performances[self._performances.index(existing)] = replacement
+        return replacement
 
     def cancel_performance(self, performance_id: str) -> Performance:
         performance = self.get_performance(performance_id)
         if performance is None:
-            raise ValueError(f"Unknown performance '{performance_id}'.")
+            raise NotFoundError(f"Unknown performance '{performance_id}'.")
         self._performances.remove(performance)
         return performance
 
-    def _validate_performance(self, performance: Performance) -> None:
+    def add_artist(self, artist: Artist) -> None:
+        if self.get_artist(artist.slug) is not None:
+            raise ConflictError(f"An artist named '{artist.name}' already exists.")
+        object.__setattr__(self, "artists", (*self.artists, artist))
+
+    def register_participant(self, performance_id: str, name: str) -> Workshop:
+        performance = self.get_performance(performance_id)
+        if performance is None:
+            raise NotFoundError(f"Unknown performance '{performance_id}'.")
+        if not isinstance(performance, Workshop):
+            raise InvalidValueError(
+                f"Performance '{performance_id}' is not a workshop."
+            )
+        performance.register_participant(name)
+        return performance
+
+    def _validate_performance(
+        self, performance: Performance, excluding: Performance | None = None
+    ) -> None:
         if self.get_venue(performance.venue.slug) is None:
-            raise ValueError(f"Unknown venue '{performance.venue.slug}'.")
+            raise NotFoundError(f"Unknown venue '{performance.venue.slug}'.")
 
         for artist in performance.artists:
             if self.get_artist(artist.slug) is None:
-                raise ValueError(f"Unknown artist '{artist.slug}'.")
+                raise NotFoundError(f"Unknown artist '{artist.slug}'.")
 
         if not 1 <= performance.duration_minutes <= 360:
-            raise ValueError("Duration must be between 1 and 360 minutes.")
+            raise InvalidValueError("Duration must be between 1 and 360 minutes.")
 
         if not self.first_day <= performance.festival_day <= self.last_day:
-            raise ValueError(
+            raise ConflictError(
                 f"{performance.festival_day} is not a day of the festival."
             )
 
         for existing in self._performances:
+            if existing is excluding:
+                continue
             if not times_conflict(existing, performance):
                 continue
             if existing.venue.slug == performance.venue.slug:
-                raise ValueError(
+                raise ConflictError(
                     f"{performance.venue.name} is busy with {existing.title} "
                     f"({existing.start:%Y-%m-%d %H:%M}-{existing.end:%H:%M})."
                 )
             for artist in performance.artists:
                 if existing.involves(artist):
-                    raise ValueError(f"{artist.name} is on stage in {existing.title}.")
+                    raise ConflictError(
+                        f"{artist.name} is on stage in {existing.title}."
+                    )
 
     def to_data(self) -> dict:
         return {
@@ -474,7 +578,22 @@ def performance_from_data(
         "lineup": Lineup,
         "workshop": Workshop,
     }
-    return performance_types[data["kind"]].from_data(data, venues, artists)
+    performance_type = performance_types.get(data["kind"])
+    if performance_type is None:
+        raise InvalidValueError(f"Unknown performance kind '{data['kind']}'.")
+    venue_slug = data["venue"]
+    if venue_slug not in venues:
+        raise NotFoundError(f"Unknown venue '{venue_slug}'.")
+    artist_fields = {
+        "solo": lambda record: [record["artist"]],
+        "lineup": lambda record: [record["host"], *record["acts"]],
+        "workshop": lambda record: [record["teacher"]],
+    }
+    artist_slugs = artist_fields[data["kind"]](data)
+    for artist_slug in artist_slugs:
+        if artist_slug not in artists:
+            raise NotFoundError(f"Unknown artist '{artist_slug}'.")
+    return performance_type.from_data(data, venues, artists)
 
 
 def festival_from_data(data: dict) -> Festival:
@@ -493,25 +612,43 @@ def festival_from_data(data: dict) -> Festival:
         performance_from_data(performance, venue_lookup, artist_lookup)
         for performance in data["performances"]
     ]
-    return Festival(
+    festival = Festival(
         name=data["name"],
         first_day=date.fromisoformat(data["first_day"]),
         last_day=date.fromisoformat(data["last_day"]),
         venues=venues,
         artists=artists,
-        _performances=performances,
     )
+    for performance in performances:
+        festival.add_performance(performance)
+    return festival
 
 
 def load_festival() -> Festival:
     with Path("data/festival.json").open(encoding="utf-8") as file:
-        return festival_from_data(json.load(file))
+        data = json.load(file)
+    try:
+        return festival_from_data(data)
+    except FestivalError as error:
+        raise DataError(f"The festival data is invalid: {error}") from error
+    except (KeyError, TypeError, ValueError) as error:
+        raise DataError("The festival data has an invalid structure.") from error
 
 
 def save_festival(festival: Festival) -> None:
-    with Path("data/festival.json").open("w", encoding="utf-8") as file:
-        json.dump(festival.to_data(), file, ensure_ascii=False, indent=2)
-        file.write("\n")
+    path = Path("data/festival.json")
+    temporary_path: Path | None = None
+    try:
+        with NamedTemporaryFile(
+            "w", encoding="utf-8", dir=path.parent, delete=False
+        ) as file:
+            temporary_path = Path(file.name)
+            json.dump(festival.to_data(), file, ensure_ascii=False, indent=2)
+            file.write("\n")
+        temporary_path.replace(path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def start_of(performance: Performance) -> datetime:
@@ -550,8 +687,11 @@ def parse_day(text: str) -> date:
         or text[7] != "-"
         or not (text[:4] + text[5:7] + text[8:]).isdigit()
     ):
-        raise ValueError(f"'{text}' is not a day, use YYYY-MM-DD.")
-    return date.fromisoformat(text)
+        raise InvalidValueError(f"'{text}' is not a day, use YYYY-MM-DD.")
+    try:
+        return date.fromisoformat(text)
+    except ValueError as error:
+        raise InvalidValueError(f"'{text}' is not a valid day.") from error
 
 
 def parse_moment(text: str) -> datetime:
@@ -563,8 +703,13 @@ def parse_moment(text: str) -> datetime:
         or text[13] != ":"
         or not (text[:4] + text[5:7] + text[8:10] + text[11:13] + text[14:]).isdigit()
     ):
-        raise ValueError(f"'{text}' is not a valid moment, use YYYY-MM-DDTHH:MM.")
-    return datetime.fromisoformat(text)
+        raise InvalidValueError(
+            f"'{text}' is not a valid moment, use YYYY-MM-DDTHH:MM."
+        )
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError as error:
+        raise InvalidValueError(f"'{text}' is not a valid moment.") from error
 
 
 def get_programme(festival: Festival, day: str) -> list[Performance]:
@@ -600,7 +745,7 @@ def show_programme(festival: Festival, day: str) -> None:
 def show_artist(festival: Festival, artist_slug: str) -> None:
     artist = festival.get_artist(artist_slug)
     if artist is None:
-        raise ValueError(f"No artist '{artist_slug}'.")
+        raise NotFoundError(f"No artist '{artist_slug}'.")
     print(artist.name)
     for performance in festival.performances_for_artist(artist):
         for role in performance.roles_for(artist):
@@ -636,15 +781,15 @@ def add_performance(festival: Festival) -> None:
     start_text = input("Start (YYYY-MM-DDTHH:MM): ").strip()
     duration_text = input("Duration (minutes): ").strip()
     if not title:
-        raise ValueError("The performance title cannot be empty.")
+        raise InvalidValueError("The performance title cannot be empty.")
     if not duration_text.isdigit():
-        raise ValueError(f"'{duration_text}' is not a number of minutes.")
+        raise InvalidValueError(f"'{duration_text}' is not a number of minutes.")
     venue = festival.get_venue(venue_slug)
     if venue is None:
-        raise ValueError(f"Unknown venue '{venue_slug}'.")
+        raise NotFoundError(f"Unknown venue '{venue_slug}'.")
     artist = festival.get_artist(artist_slug)
     if artist is None:
-        raise ValueError(f"Unknown artist '{artist_slug}'.")
+        raise NotFoundError(f"Unknown artist '{artist_slug}'.")
     performance = SoloShow(
         title=title,
         venue=venue,

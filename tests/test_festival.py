@@ -178,6 +178,43 @@ def test_now_queries_return_active_and_next_performances(festival: Festival) -> 
     assert festival.up_next(moment) == upcoming[:3]
 
 
+def test_festival_and_kind_collections_are_read_only(festival: Festival) -> None:
+    lineup = Lineup(
+        title="Lineup",
+        venue=festival.venues[0],
+        start=datetime(2027, 6, 10, 10),
+        duration_minutes=60,
+        host=festival.artists[0],
+        acts=[festival.artists[1], festival.artists[2]],
+    )
+    workshop = Workshop(
+        title="Workshop",
+        venue=festival.venues[0],
+        start=datetime(2027, 6, 10, 12),
+        duration_minutes=60,
+        teacher=festival.artists[3],
+        max_participants=10,
+    )
+
+    with pytest.raises(AttributeError):
+        festival.performances.append(make_solo(festival))
+    with pytest.raises(AttributeError):
+        festival.artists.append(Artist("Extra Artist", ""))
+    with pytest.raises(AttributeError):
+        lineup.acts.append(festival.artists[3])
+    with pytest.raises(AttributeError):
+        workshop.participants.append("New participant")
+    with pytest.raises(TypeError):
+        Festival(
+            name=festival.name,
+            first_day=festival.first_day,
+            last_day=festival.last_day,
+            venues=festival.venues,
+            artists=festival.artists,
+            _performances=[make_solo(festival)],
+        )
+
+
 @pytest.mark.parametrize("min_age", [-1, 19])
 def test_solo_rejects_minimum_age_outside_range(
     festival: Festival, min_age: int

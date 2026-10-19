@@ -35,7 +35,7 @@ when a notion needs more practice. Each sheet ends with the matching part.
 | B5    | [12 The whole contract](B5/E12_full_contract.md)           | all of `API.md`, tested                                      |
 |       | [13 Ship it](B5/E13_ship.md)                               | a fresh clone runs; your README explains your structure      |
 
-## Project model (Steps 07-09)
+## Project model (Steps 07-10)
 
 - `Venue` and `Artist` hold the fields loaded from the JSON file and compute
   their stable slugs from their names.
@@ -44,11 +44,14 @@ when a notion needs more practice. Each sheet ends with the matching part.
   `SoloShow`, `Lineup`, and `Workshop` each provide their own artists, roles,
   summary, kind-specific fields, and validation.
 - `Festival` owns the venue, artist, and private performance collections. Its
-  methods are the only way to add or cancel performances, enforcing scheduling
-  rules for both the CLI and API. It also provides lookups, ordered programme
-  queries, and "on stage now" results. The JSON loader selects the performance
-  subclass from each record's `kind`, then builds the object graph shared by
-  the command line and API.
+  methods are the only way to add, move, cancel, or register participants,
+  enforcing scheduling and capacity rules for both the CLI and API. Its
+  collections are exposed as read-only tuples. The JSON loader selects the
+  performance subclass from each record's `kind`, then builds the object graph
+  shared by the command line and API.
+- `FestivalError` and its not-found, conflict, and invalid-value subclasses let
+  the API map domain refusals to HTTP statuses in one handler. Pydantic request
+  models validate admin bodies; successful changes are atomically saved.
 
 Each block README lists its steps and side examples: [B1](B1/README.md),
 [B2](B2/README.md), [B3](B3/README.md), [B4](B4/README.md),

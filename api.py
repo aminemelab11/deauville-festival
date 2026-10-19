@@ -1,12 +1,122 @@
+import logging
 from datetime import date, datetime, timedelta
+from json import JSONDecodeError
 from pathlib import Path
+from typing import Annotated, Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict, Field
 
-from festival import load_festival
+from festival import (
+    Artist,
+    ConflictError,
+    DataError,
+    Festival,
+    FestivalError,
+    InvalidValueError,
+    NotFoundError,
+    Performance,
+    load_festival,
+    performance_from_data,
+    save_festival,
+)
 
 app = FastAPI()
+logger = logging.getLogger(__name__)
+
+
+class ArtistRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str = Field(min_length=1)
+    bio: str = ""
+    photo_url: str = ""
+
+
+class ParticipantRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str = Field(min_length=1)
+
+
+class PerformanceRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    title: str = Field(min_length=1)
+    venue: str = Field(min_length=1)
+    start: datetime
+    duration_minutes: int = Field(ge=1, le=360)
+    description: str = ""
+
+
+class SoloShowRequest(PerformanceRequest):
+    kind: Literal["solo"]
+    artist: str = Field(min_length=1)
+    min_age: int = Field(default=0, ge=0, le=18)
+
+
+class LineupRequest(PerformanceRequest):
+    kind: Literal["lineup"]
+    host: str = Field(min_length=1)
+    acts: list[str]
+
+
+class WorkshopRequest(PerformanceRequest):
+    kind: Literal["workshop"]
+    teacher: str = Field(min_length=1)
+    max_participants: int = Field(ge=1)
+    participants: list[str] = Field(default_factory=list)
+
+
+PerformanceRequestBody = Annotated[
+    SoloShowRequest | LineupRequest | WorkshopRequest,
+    Field(discriminator="kind"),
+]
+
+
+@app.exception_handler(FestivalError)
+def festival_error_handler(_: Request, error: FestivalError) -> JSONResponse:
+    if isinstance(error, DataError):
+        status_code = 500
+    elif isinstance(error, NotFoundError):
+        status_code = 404
+    elif isinstance(error, ConflictError):
+        status_code = 409
+    elif isinstance(error, InvalidValueError):
+        status_code = 422
+    else:
+        status_code = 422
+    return JSONResponse(status_code=status_code, content={"detail": str(error)})
+
+
+@app.exception_handler(OSError)
+def storage_error_handler(_: Request, error: OSError) -> JSONResponse:
+    logger.error("Unable to read or write the festival data file: %s", error)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "The festival data file could not be read or written."},
+    )
+
+
+@app.exception_handler(JSONDecodeError)
+def invalid_data_file_handler(_: Request, error: JSONDecodeError) -> JSONResponse:
+    logger.error("The festival data file contains invalid JSON: %s", error.msg)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "The festival data file contains invalid JSON."},
+    )
+
+
+def make_performance(
+    festival: Festival, request: PerformanceRequestBody
+) -> Performance:
+    return performance_from_data(
+        request.model_dump(mode="json"),
+        {venue.slug: venue for venue in festival.venues},
+        {artist.slug: artist for artist in festival.artists},
+    )
 
 
 @app.get("/api/festival")
@@ -96,6 +206,49 @@ def get_now(at: datetime | None = None) -> dict:
         ],
         "up_next": [performance.to_view() for performance in festival.up_next(moment)],
     }
+
+
+@app.post("/api/artists", status_code=201)
+def create_artist(request: ArtistRequest) -> dict:
+    festival = load_festival()
+    artist = Artist(**request.model_dump())
+    festival.add_artist(artist)
+    save_festival(festival)
+    return artist.to_view()
+
+
+@app.post("/api/performances", status_code=201)
+def create_performance(request: PerformanceRequestBody) -> dict:
+    festival = load_festival()
+    performance = make_performance(festival, request)
+    festival.add_performance(performance)
+    save_festival(festival)
+    return performance.to_view()
+
+
+@app.put("/api/performances/{performance_id}")
+def update_performance(performance_id: str, request: PerformanceRequestBody) -> dict:
+    festival = load_festival()
+    performance = make_performance(festival, request)
+    updated = festival.update_performance(performance_id, performance)
+    save_festival(festival)
+    return updated.to_view()
+
+
+@app.delete("/api/performances/{performance_id}", status_code=204)
+def delete_performance(performance_id: str) -> Response:
+    festival = load_festival()
+    festival.cancel_performance(performance_id)
+    save_festival(festival)
+    return Response(status_code=204)
+
+
+@app.post("/api/performances/{performance_id}/participants", status_code=201)
+def create_participant(performance_id: str, request: ParticipantRequest) -> dict:
+    festival = load_festival()
+    workshop = festival.register_participant(performance_id, request.name)
+    save_festival(festival)
+    return workshop.to_view()
 
 
 web_directory = Path(__file__).parent / "web"
