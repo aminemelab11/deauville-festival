@@ -77,3 +77,10 @@ block starts where the previous one ended.
    ```
 
 Then [step 00](B1/E00_start.md) creates your project, in its own folder.
+
+## Known bugs
+
+- **Festival day boundary — Fixed in Step 04:** Performances
+  starting before 06:00 are now assigned to the previous festival
+  day. For example, "After Hours" starts at 01:00 on 12 June
+  but correctly appears in Friday's programme (11 June).
