@@ -41,9 +41,11 @@ when a notion needs more practice. Each sheet ends with the matching part.
   their stable slugs from their names.
 - `Performance` holds a venue and its participating artists as objects. It
   computes its end time, festival day, identifier, summary, and API view.
-- `Festival` groups the festival dates, venues, artists, and performances. It
-  provides lookups and ordered programme queries. The loader builds this object
-  graph from JSON so the command line and API share the same computed values.
+- `Festival` owns the venue, artist, and private performance collections. Its
+  methods are the only way to add or cancel performances, enforcing scheduling
+  rules for both the CLI and API. It also provides lookups, ordered programme
+  queries, and "on stage now" results. The loader builds this object graph
+  from JSON so callers share the same computations and rules.
 
 Each block README lists its steps and side examples: [B1](B1/README.md),
 [B2](B2/README.md), [B3](B3/README.md), [B4](B4/README.md),

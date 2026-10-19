@@ -34,7 +34,7 @@ class Venue:
         }
 
 
-@dataclass
+@dataclass(eq=False)
 class Artist:
     name: str
     bio: str
@@ -52,6 +52,11 @@ class Artist:
             "photo_url": self.photo_url,
         }
 
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Artist):
+            return NotImplemented
+        return self.slug == other.slug
+
 
 @dataclass
 class Performance:
@@ -68,6 +73,11 @@ class Performance:
     teacher: Artist | None = None
     max_participants: int | None = None
     participants: list[str] = field(default_factory=list)
+
+    def __lt__(self, other: Performance) -> bool:
+        if not isinstance(other, Performance):
+            return NotImplemented
+        return (self.start, self.venue.name) < (other.start, other.venue.name)
 
     @property
     def end(self) -> datetime:
@@ -202,7 +212,19 @@ class Festival:
     last_day: date
     venues: list[Venue]
     artists: list[Artist]
-    performances: list[Performance]
+    _performances: list[Performance] = field(default_factory=list, repr=False)
+
+    @property
+    def performances(self) -> tuple[Performance, ...]:
+        return tuple(self._performances)
+
+    def __str__(self) -> str:
+        return (
+            f"{self.name}\n"
+            f"From {self.first_day} to {self.last_day}\n"
+            f"{len(self.venues)} venues, {len(self.artists)} artists, "
+            f"{len(self._performances)} performances"
+        )
 
     @property
     def days(self) -> list[date]:
@@ -230,10 +252,7 @@ class Festival:
         )
 
     def ordered_performances(self) -> list[Performance]:
-        return sorted(
-            self.performances,
-            key=lambda performance: (performance.start, performance.venue.name),
-        )
+        return sorted(self._performances)
 
     def performances_for_day(self, selected_day: date) -> list[Performance]:
         return [
@@ -248,6 +267,59 @@ class Festival:
             for performance in self.ordered_performances()
             if performance.involves(artist)
         ]
+
+    def on_stage(self, at: datetime) -> list[Performance]:
+        return sorted(
+            performance
+            for performance in self._performances
+            if performance.start <= at < performance.end
+        )
+
+    def up_next(self, at: datetime, limit: int = 3) -> list[Performance]:
+        return sorted(
+            performance for performance in self._performances if performance.start > at
+        )[:limit]
+
+    def add_performance(self, performance: Performance) -> None:
+        self._validate_performance(performance)
+        if self.get_performance(performance.id) is not None:
+            raise ValueError(f"A performance already exists at '{performance.id}'.")
+        self._performances.append(performance)
+
+    def cancel_performance(self, performance_id: str) -> Performance:
+        performance = self.get_performance(performance_id)
+        if performance is None:
+            raise ValueError(f"Unknown performance '{performance_id}'.")
+        self._performances.remove(performance)
+        return performance
+
+    def _validate_performance(self, performance: Performance) -> None:
+        if self.get_venue(performance.venue.slug) is None:
+            raise ValueError(f"Unknown venue '{performance.venue.slug}'.")
+
+        for artist in performance.artists:
+            if self.get_artist(artist.slug) is None:
+                raise ValueError(f"Unknown artist '{artist.slug}'.")
+
+        if not 1 <= performance.duration_minutes <= 360:
+            raise ValueError("Duration must be between 1 and 360 minutes.")
+
+        if not self.first_day <= performance.festival_day <= self.last_day:
+            raise ValueError(
+                f"{performance.festival_day} is not a day of the festival."
+            )
+
+        for existing in self._performances:
+            if not times_conflict(existing, performance):
+                continue
+            if existing.venue.slug == performance.venue.slug:
+                raise ValueError(
+                    f"{performance.venue.name} is busy with {existing.title} "
+                    f"({existing.start:%Y-%m-%d %H:%M}-{existing.end:%H:%M})."
+                )
+            for artist in performance.artists:
+                if existing.involves(artist):
+                    raise ValueError(f"{artist.name} is on stage in {existing.title}.")
 
     def to_data(self) -> dict:
         return {
@@ -271,7 +343,7 @@ class Festival:
                 for artist in self.artists
             ],
             "performances": [
-                performance.to_data() for performance in self.performances
+                performance.to_data() for performance in self._performances
             ],
         }
 
@@ -323,7 +395,7 @@ def festival_from_data(data: dict) -> Festival:
         last_day=date.fromisoformat(data["last_day"]),
         venues=venues,
         artists=artists,
-        performances=performances,
+        _performances=performances,
     )
 
 
@@ -399,41 +471,8 @@ def performance_id(performance: Performance) -> str:
     return performance.id
 
 
-def validate_performance(festival: Festival, performance: Performance) -> None:
-    if festival.get_venue(performance.venue.slug) is None:
-        raise ValueError(f"Unknown venue '{performance.venue.slug}'.")
-
-    for artist in performance.artists:
-        if festival.get_artist(artist.slug) is None:
-            raise ValueError(f"Unknown artist '{artist.slug}'.")
-
-    if not 1 <= performance.duration_minutes <= 360:
-        raise ValueError("Duration must be between 1 and 360 minutes.")
-
-    if not festival.first_day <= performance.festival_day <= festival.last_day:
-        raise ValueError(f"{performance.festival_day} is not a day of the festival.")
-
-    for existing in festival.performances:
-        if not times_conflict(existing, performance):
-            continue
-        if existing.venue.slug == performance.venue.slug:
-            raise ValueError(
-                f"{performance.venue.name} is busy with {existing.title} "
-                f"({existing.start:%Y-%m-%d %H:%M}-{existing.end:%H:%M})."
-            )
-        for artist in performance.artists:
-            if existing.involves(artist):
-                raise ValueError(f"{artist.name} is on stage in {existing.title}.")
-
-
 def show_summary(festival: Festival) -> None:
-    print(festival.name)
-    print(f"From {festival.first_day} to {festival.last_day}")
-    print(
-        f"{len(festival.venues)} venues, "
-        f"{len(festival.artists)} artists, "
-        f"{len(festival.performances)} performances"
-    )
+    print(festival)
 
 
 def show_venues(festival: Festival) -> None:
@@ -470,19 +509,8 @@ def show_artist(festival: Festival, artist_slug: str) -> None:
 
 def show_now(festival: Festival, moment: str) -> None:
     at = parse_moment(moment)
-    on_stage = [
-        performance
-        for performance in festival.performances
-        if performance.start <= at < performance.end
-    ]
-    upcoming = sorted(
-        (
-            performance
-            for performance in festival.performances
-            if performance.start > at
-        ),
-        key=lambda performance: (performance.start, performance.venue.name),
-    )[:3]
+    on_stage = festival.on_stage(at)
+    upcoming = festival.up_next(at)
     print(f"On stage at {at:%Y-%m-%d %H:%M}:")
     for performance in on_stage:
         print(
@@ -523,16 +551,12 @@ def add_performance(festival: Festival) -> None:
         artist=artist,
         min_age=0,
     )
-    validate_performance(festival, performance)
-    festival.performances.append(performance)
+    festival.add_performance(performance)
     save_festival(festival)
     print(f"Added: {performance.id}")
 
 
 def cancel_performance(festival: Festival, requested_id: str) -> None:
-    performance = festival.get_performance(requested_id)
-    if performance is None:
-        raise ValueError(f"Unknown performance '{requested_id}'.")
-    festival.performances.remove(performance)
+    performance = festival.cancel_performance(requested_id)
     save_festival(festival)
     print(f"Cancelled: {performance.title}")

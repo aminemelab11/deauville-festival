@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -83,6 +83,19 @@ def get_performance(performance_id: str) -> dict:
             detail=f"No performance '{performance_id}'.",
         )
     return performance.to_view()
+
+
+@app.get("/api/now")
+def get_now(at: datetime | None = None) -> dict:
+    festival = load_festival()
+    moment = at or datetime.now()
+    return {
+        "at": moment.isoformat(timespec="minutes"),
+        "now_playing": [
+            performance.to_view() for performance in festival.on_stage(moment)
+        ],
+        "up_next": [performance.to_view() for performance in festival.up_next(moment)],
+    }
 
 
 web_directory = Path(__file__).parent / "web"

@@ -175,3 +175,29 @@ def test_workshop_performance_view_reports_remaining_places() -> None:
     assert response.status_code == 200
     assert response.json()["places_left"] == 9
     assert response.json()["capacity"] == 12
+
+
+def test_now_route_returns_active_and_next_three_performances() -> None:
+    response = client.get("/api/now", params={"at": "2027-06-11T21:00"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["at"] == "2027-06-11T21:00"
+    assert [performance["title"] for performance in data["now_playing"]] == [
+        "Tall Tales"
+    ]
+    assert [performance["title"] for performance in data["up_next"]] == [
+        "Straight Face",
+        "Late Laughs",
+        "After Hours",
+    ]
+
+
+def test_now_route_returns_after_hours_when_it_is_active() -> None:
+    response = client.get("/api/now", params={"at": "2027-06-12T01:30"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [performance["title"] for performance in data["now_playing"]] == [
+        "After Hours"
+    ]
