@@ -64,7 +64,9 @@ depend on JSON or file paths.
 Run `uv sync`, then use `uv run deauville programme 2027-06-11` or
 `uv run deauville serve`. Both commands accept `--data PATH` before or after
 the subcommand; the default is `data/festival.json`. Run `uv run pytest` for
-the tests and `uv build` to build the wheel.
+the tests and `uv build` to build the wheel. The API is created with
+`create_app(storage)`, so HTTP tests use an isolated copy of the festival data
+in pytest's temporary directory rather than changing the project data file.
 
 Each block README lists its steps and side examples: [B1](B1/README.md),
 [B2](B2/README.md), [B3](B3/README.md), [B4](B4/README.md),

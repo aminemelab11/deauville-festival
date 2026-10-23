@@ -8,8 +8,7 @@ from fastapi.testclient import TestClient
 root = str(Path(__file__).parent.parent)
 sys.path.insert(0, str(Path(root) / "src"))
 try:
-    import deauville.api as api_module
-    from deauville.api import app
+    from deauville.api import create_app
     from deauville.festival import (
         Artist,
         Festival,
@@ -19,43 +18,41 @@ try:
         Venue,
         Workshop,
     )
-    from deauville.storage import JsonFileStorage, MemoryStorage
+    from deauville.storage import JsonFileStorage
 finally:
     sys.path.remove(str(Path(root) / "src"))
 
-client = TestClient(app)
+
+@pytest.fixture
+def festival_data_path(tmp_path: Path) -> Path:
+    data_directory = tmp_path / "data"
+    data_directory.mkdir()
+    source = Path(__file__).parent.parent / "data" / "festival.json"
+    destination = data_directory / "festival.json"
+    destination.write_bytes(source.read_bytes())
+    return destination
 
 
 @pytest.fixture
-def writable_festival(monkeypatch: pytest.MonkeyPatch) -> tuple[Festival, list[dict]]:
-    festival = JsonFileStorage(Path("data/festival.json")).load()
-    saved_data = []
-
-    class RecordingStorage(MemoryStorage):
-        def save(self, value: Festival) -> None:
-            super().save(value)
-            saved_data.append(value.to_data())
-
-    storage = RecordingStorage(festival)
-    monkeypatch.setattr(api_module.app.state, "storage", storage)
-    return festival, saved_data
+def client(festival_data_path: Path) -> TestClient:
+    return TestClient(create_app(JsonFileStorage(festival_data_path)))
 
 
-def test_homepage_serves_static_site() -> None:
+def test_homepage_serves_static_site(client: TestClient) -> None:
     response = client.get("/")
 
     assert response.status_code == 200
     assert "showHomePage();" in response.text
 
 
-def test_admin_page_serves_starter_admin() -> None:
+def test_admin_page_serves_starter_admin(client: TestClient) -> None:
     response = client.get("/admin/")
 
     assert response.status_code == 200
     assert "New performance" in response.text
 
 
-def test_festival_route_returns_dates() -> None:
+def test_festival_route_returns_dates(client: TestClient) -> None:
     response = client.get("/api/festival")
 
     assert response.status_code == 200
@@ -67,7 +64,7 @@ def test_festival_route_returns_dates() -> None:
     }
 
 
-def test_venues_route_returns_contract_fields_in_file_order() -> None:
+def test_venues_route_returns_contract_fields_in_file_order(client: TestClient) -> None:
     response = client.get("/api/venues")
 
     assert response.status_code == 200
@@ -83,7 +80,9 @@ def test_venues_route_returns_contract_fields_in_file_order() -> None:
     )
 
 
-def test_artists_route_returns_contract_fields_sorted_by_slug() -> None:
+def test_artists_route_returns_contract_fields_sorted_by_slug(
+    client: TestClient,
+) -> None:
     response = client.get("/api/artists")
 
     assert response.status_code == 200
@@ -98,8 +97,8 @@ def test_artists_route_returns_contract_fields_sorted_by_slug() -> None:
     )
 
 
-def test_festival_loads_data_as_objects() -> None:
-    festival = JsonFileStorage(Path("data/festival.json")).load()
+def test_festival_loads_data_as_objects(client: TestClient) -> None:
+    festival = client.app.state.storage.load()
 
     assert isinstance(festival, Festival)
     assert all(isinstance(venue, Venue) for venue in festival.venues)
@@ -114,7 +113,27 @@ def test_festival_loads_data_as_objects() -> None:
     assert isinstance(festival.get_performance("la-cabane-2027-06-11-1030"), Workshop)
 
 
-def test_programme_route_returns_performance_views_and_filters() -> None:
+def test_application_factory_keeps_storage_instances_independent(
+    festival_data_path: Path, tmp_path: Path
+) -> None:
+    second_data_path = tmp_path / "second-festival.json"
+    second_data_path.write_bytes(festival_data_path.read_bytes())
+    first_client = TestClient(create_app(JsonFileStorage(festival_data_path)))
+    second_client = TestClient(create_app(JsonFileStorage(second_data_path)))
+
+    response = first_client.post(
+        "/api/artists",
+        json={"name": "Zoé Tanguy"},
+    )
+
+    assert response.status_code == 201
+    assert len(first_client.get("/api/artists").json()) == 13
+    assert len(second_client.get("/api/artists").json()) == 12
+
+
+def test_programme_route_returns_performance_views_and_filters(
+    client: TestClient,
+) -> None:
     response = client.get("/api/programme", params={"day": "2027-06-11"})
 
     assert response.status_code == 200
@@ -131,22 +150,30 @@ def test_programme_route_returns_performance_views_and_filters() -> None:
     venue_response = client.get("/api/programme", params={"venue": "le-kiosque"})
     assert venue_response.status_code == 200
     assert len(venue_response.json()) == 7
+    combined_response = client.get(
+        "/api/programme",
+        params={"day": "2027-06-11", "venue": "le-kiosque"},
+    )
+    assert combined_response.status_code == 200
+    assert {item["id"] for item in combined_response.json()} == {
+        item["id"] for item in performances
+    } & {item["id"] for item in venue_response.json()}
 
 
-def test_programme_route_returns_404_for_unknown_venue() -> None:
+def test_programme_route_returns_404_for_unknown_venue(client: TestClient) -> None:
     response = client.get("/api/programme", params={"venue": "nowhere"})
 
     assert response.status_code == 404
     assert response.json() == {"detail": "No venue 'nowhere'."}
 
 
-def test_programme_route_rejects_invalid_day() -> None:
+def test_programme_route_rejects_invalid_day(client: TestClient) -> None:
     response = client.get("/api/programme", params={"day": "June 11"})
 
     assert response.status_code == 422
 
 
-def test_performance_route_returns_full_view() -> None:
+def test_performance_route_returns_full_view(client: TestClient) -> None:
     response = client.get("/api/performances/le-kiosque-2027-06-12-0100")
 
     assert response.status_code == 200
@@ -173,14 +200,14 @@ def test_performance_route_returns_full_view() -> None:
     }
 
 
-def test_performance_route_returns_404_for_unknown_id() -> None:
+def test_performance_route_returns_404_for_unknown_id(client: TestClient) -> None:
     response = client.get("/api/performances/unknown")
 
     assert response.status_code == 404
     assert response.json() == {"detail": "No performance 'unknown'."}
 
 
-def test_artist_detail_route_lists_performances_in_order() -> None:
+def test_artist_detail_route_lists_performances_in_order(client: TestClient) -> None:
     response = client.get("/api/artists/max-pellerin")
 
     assert response.status_code == 200
@@ -194,14 +221,16 @@ def test_artist_detail_route_lists_performances_in_order() -> None:
     ]
 
 
-def test_artist_detail_route_returns_404_for_unknown_artist() -> None:
+def test_artist_detail_route_returns_404_for_unknown_artist(client: TestClient) -> None:
     response = client.get("/api/artists/nowhere")
 
     assert response.status_code == 404
     assert response.json() == {"detail": "No artist 'nowhere'."}
 
 
-def test_workshop_performance_view_reports_remaining_places() -> None:
+def test_workshop_performance_view_reports_remaining_places(
+    client: TestClient,
+) -> None:
     response = client.get("/api/performances/la-cabane-2027-06-11-1030")
 
     assert response.status_code == 200
@@ -209,7 +238,9 @@ def test_workshop_performance_view_reports_remaining_places() -> None:
     assert response.json()["capacity"] == 12
 
 
-def test_solo_performance_view_includes_age_and_artist_fields() -> None:
+def test_solo_performance_view_includes_age_and_artist_fields(
+    client: TestClient,
+) -> None:
     response = client.get("/api/performances/theatre-des-planches-2027-06-11-2130")
 
     assert response.status_code == 200
@@ -221,10 +252,8 @@ def test_solo_performance_view_includes_age_and_artist_fields() -> None:
 
 
 def test_admin_adds_artist_and_rejects_duplicate_slug(
-    writable_festival: tuple[Festival, list[dict]],
+    client: TestClient,
 ) -> None:
-    festival, saved_data = writable_festival
-
     created = client.post(
         "/api/artists",
         json={"name": " Zoé Tanguy ", "bio": "New artist."},
@@ -237,15 +266,52 @@ def test_admin_adds_artist_and_rejects_duplicate_slug(
     assert duplicate.json() == {
         "detail": "An artist named 'zoe tanguy' already exists."
     }
-    assert len(festival.artists) == 13
-    assert len(saved_data) == 1
-    assert saved_data[0]["artists"][-1]["name"] == "Zoé Tanguy"
+    persisted = client.app.state.storage.load()
+    assert len(persisted.artists) == 13
+    assert persisted.artists[-1].name == "Zoé Tanguy"
+
+
+def test_admin_creates_lineup_and_workshop_views(client: TestClient) -> None:
+    lineup = client.post(
+        "/api/performances",
+        json={
+            "kind": "lineup",
+            "title": "Sunday Lineup",
+            "venue": "grand-casino",
+            "start": "2027-06-13T11:00",
+            "duration_minutes": 23,
+            "host": "tom-vasseur",
+            "acts": ["hugo-lemaire", "maya-choukri"],
+        },
+    )
+    workshop = client.post(
+        "/api/performances",
+        json={
+            "kind": "workshop",
+            "title": "Big Workshop",
+            "venue": "grand-casino",
+            "start": "2027-06-13T14:00",
+            "duration_minutes": 60,
+            "teacher": "ines-moreau",
+            "max_participants": 999,
+            "participants": ["Camille R."],
+        },
+    )
+
+    assert lineup.status_code == 201
+    assert lineup.json()["summary"] == (
+        "hosted by Tom Vasseur, with Hugo Lemaire, Maya Choukri"
+    )
+    assert lineup.json()["acts"] == ["hugo-lemaire", "maya-choukri"]
+    assert workshop.status_code == 201
+    assert workshop.json()["capacity"] == 650
+    assert workshop.json()["participants"] == ["Camille R."]
+    assert workshop.json()["places_left"] == 649
 
 
 def test_admin_schedules_performance_and_rejects_busy_venue(
-    writable_festival: tuple[Festival, list[dict]],
+    client: TestClient,
 ) -> None:
-    festival, saved_data = writable_festival
     body = {
         "kind": "solo",
         "title": "New Nora Show",
@@ -270,14 +336,12 @@ def test_admin_schedules_performance_and_rejects_busy_venue(
     assert created.json()["id"] == "le-kiosque-2027-06-13-1100"
     assert conflict.status_code == 409
     assert "Le Kiosque is busy" in conflict.json()["detail"]
-    assert len(festival.performances) == 24
-    assert len(saved_data) == 1
+    assert len(client.app.state.storage.load().performances) == 24
 
 
 def test_admin_move_is_atomic_when_new_slot_is_busy(
-    writable_festival: tuple[Festival, list[dict]],
+    client: TestClient,
 ) -> None:
-    festival, saved_data = writable_festival
     body = {
         "kind": "solo",
         "title": "New Nora Show",
@@ -301,34 +365,72 @@ def test_admin_move_is_atomic_when_new_slot_is_busy(
     assert moved.status_code == 200
     assert moved.json()["id"] == "le-kiosque-2027-06-13-1200"
     assert refused_move.status_code == 409
-    assert festival.get_performance(moved.json()["id"]).start.isoformat() == (
+    persisted = client.app.state.storage.load()
+    assert persisted.get_performance(moved.json()["id"]).start.isoformat() == (
         "2027-06-13T12:00:00"
     )
-    assert festival.get_performance(old_id) is None
-    assert len(saved_data) == 2
+    assert persisted.get_performance(old_id) is None
 
 
 def test_admin_cancels_performance(
-    writable_festival: tuple[Festival, list[dict]],
+    client: TestClient,
 ) -> None:
-    festival, saved_data = writable_festival
+    festival = client.app.state.storage.load()
     performance_id = festival.performances[0].id
 
     response = client.delete(f"/api/performances/{performance_id}")
 
     assert response.status_code == 204
     assert response.content == b""
-    assert festival.get_performance(performance_id) is None
-    assert len(saved_data) == 1
+    assert client.app.state.storage.load().get_performance(performance_id) is None
+
+
+def test_admin_delete_twice_returns_not_found(
+    client: TestClient,
+) -> None:
+    performance_id = "le-kiosque-2027-06-12-0100"
+
+    first_delete = client.delete(f"/api/performances/{performance_id}")
+    second_delete = client.delete(f"/api/performances/{performance_id}")
+
+    assert first_delete.status_code == 204
+    assert second_delete.status_code == 404
+    assert second_delete.json() == {
+        "detail": f"Unknown performance '{performance_id}'."
+    }
+
+
+def test_admin_rejects_unknown_update_and_participant_targets(
+    client: TestClient,
+) -> None:
+    unknown_update = client.put(
+        "/api/performances/unknown",
+        json={
+            "kind": "solo",
+            "title": "Missing",
+            "venue": "le-kiosque",
+            "start": "2027-06-13T11:00",
+            "duration_minutes": 45,
+            "artist": "nora-lebrun",
+        },
+    )
+    not_workshop = client.post(
+        "/api/performances/le-kiosque-2027-06-12-0100/participants",
+        json={"name": "Camille"},
+    )
+
+    assert unknown_update.status_code == 404
+    assert unknown_update.json() == {"detail": "Unknown performance 'unknown'."}
+    assert not_workshop.status_code == 422
+    assert "not a workshop" in not_workshop.json()["detail"].lower()
 
 
 def test_admin_registers_participant_once(
-    writable_festival: tuple[Festival, list[dict]],
+    client: TestClient,
 ) -> None:
-    festival, saved_data = writable_festival
     workshop = next(
         performance
-        for performance in festival.performances
+        for performance in client.app.state.storage.load().performances
         if performance.title == "Stand-up Lab"
     )
 
@@ -345,15 +447,37 @@ def test_admin_registers_participant_once(
     assert registered.json()["participants"][-1] == "Camille Test"
     assert duplicate.status_code == 409
     assert duplicate.json() == {"detail": "camille test is already registered."}
-    assert workshop.participants[-1] == "Camille Test"
-    assert len(saved_data) == 1
+    persisted = client.app.state.storage.load().get_performance(workshop.id)
+    assert persisted.participants[-1] == "Camille Test"
+
+
+def test_admin_rejects_registration_when_workshop_is_full(
+    client: TestClient,
+) -> None:
+    workshop_id = "la-cabane-2027-06-12-1030"
+
+    registrations = [
+        client.post(
+            f"/api/performances/{workshop_id}/participants",
+            json={"name": f"Participant {number}"},
+        )
+        for number in range(6)
+    ]
+    full = client.post(
+        f"/api/performances/{workshop_id}/participants",
+        json={"name": "One too many"},
+    )
+
+    assert all(response.status_code == 201 for response in registrations)
+    assert full.status_code == 409
+    assert full.json() == {"detail": "The workshop is full."}
+    persisted = client.app.state.storage.load().get_performance(workshop_id)
+    assert persisted.places_left == 0
 
 
 def test_admin_rejects_invalid_performance_body(
-    writable_festival: tuple[Festival, list[dict]],
+    client: TestClient,
 ) -> None:
-    festival, saved_data = writable_festival
-
     response = client.post(
         "/api/performances",
         json={
@@ -366,16 +490,30 @@ def test_admin_rejects_invalid_performance_body(
             "min_age": 19,
         },
     )
+    assert response.status_code == 422
+    assert len(client.app.state.storage.load().performances) == 23
+
+
+def test_admin_rejects_missing_body_fields_with_fastapi_validation(
+    client: TestClient,
+) -> None:
+    response = client.post(
+        "/api/performances",
+        json={
+            "kind": "solo",
+            "venue": "le-kiosque",
+            "start": "2027-06-13T11:00",
+            "artist": "nora-lebrun",
+        },
+    )
 
     assert response.status_code == 422
-    assert len(festival.performances) == 23
-    assert saved_data == []
+    assert isinstance(response.json()["detail"], list)
 
 
 def test_admin_maps_missing_references_rules_and_festival_dates(
-    writable_festival: tuple[Festival, list[dict]],
+    client: TestClient,
 ) -> None:
-    festival, saved_data = writable_festival
     body = {
         "kind": "solo",
         "title": "A New Show",
@@ -413,31 +551,19 @@ def test_admin_maps_missing_references_rules_and_festival_dates(
     assert missing_artist.status_code == 404
     assert bad_date.status_code == 409
     assert one_act.status_code == 422
-    assert len(festival.performances) == 23
-    assert saved_data == []
+    assert len(client.app.state.storage.load().performances) == 23
 
 
 def test_admin_changes_are_persisted_to_the_data_file(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    client: TestClient, festival_data_path: Path
 ) -> None:
-    data_directory = tmp_path / "data"
-    data_directory.mkdir()
-    original_data = Path(__file__).parent.parent / "data" / "festival.json"
-    (data_directory / "festival.json").write_bytes(original_data.read_bytes())
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        api_module.app.state,
-        "storage",
-        JsonFileStorage(Path("data/festival.json")),
-    )
-
     response = client.post(
         "/api/artists",
         json={"name": "Zoé Tanguy", "bio": "New artist."},
     )
 
     assert response.status_code == 201
-    persisted = json.loads((data_directory / "festival.json").read_text("utf-8"))
+    persisted = json.loads(festival_data_path.read_text("utf-8"))
     assert persisted["artists"][-1]["name"] == "Zoé Tanguy"
     assert any(
         artist["slug"] == "zoe-tanguy" for artist in client.get("/api/artists").json()
@@ -445,17 +571,10 @@ def test_admin_changes_are_persisted_to_the_data_file(
 
 
 def test_invalid_json_data_file_returns_clear_server_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    festival_data_path: Path,
 ) -> None:
-    data_directory = tmp_path / "data"
-    data_directory.mkdir()
-    (data_directory / "festival.json").write_text("{", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        api_module.app.state,
-        "storage",
-        JsonFileStorage(Path("data/festival.json")),
-    )
+    festival_data_path.write_text("{", encoding="utf-8")
+    client = TestClient(create_app(JsonFileStorage(festival_data_path)))
 
     response = client.get("/api/festival")
 
@@ -465,7 +584,46 @@ def test_invalid_json_data_file_returns_clear_server_error(
     }
 
 
-def test_now_route_returns_active_and_next_three_performances() -> None:
+def test_storage_read_failure_returns_clear_server_error(
+    festival_data_path: Path,
+) -> None:
+    class FailingReadStorage(JsonFileStorage):
+        def load(self) -> Festival:
+            raise OSError("read denied")
+
+    client = TestClient(create_app(FailingReadStorage(festival_data_path)))
+    response = client.get("/api/festival")
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "detail": "The festival data file could not be read or written."
+    }
+
+
+def test_storage_write_failure_returns_clear_server_error(
+    festival_data_path: Path,
+) -> None:
+    class FailingWriteStorage(JsonFileStorage):
+        def save(self, festival: Festival) -> None:
+            raise OSError(f"write denied while saving {type(festival).__name__}")
+
+    original_data = festival_data_path.read_bytes()
+    client = TestClient(create_app(FailingWriteStorage(festival_data_path)))
+    response = client.post(
+        "/api/artists",
+        json={"name": "Zoé Tanguy"},
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "detail": "The festival data file could not be read or written."
+    }
+    assert festival_data_path.read_bytes() == original_data
+
+
+def test_now_route_returns_active_and_next_three_performances(
+    client: TestClient,
+) -> None:
     response = client.get("/api/now", params={"at": "2027-06-11T21:00"})
 
     assert response.status_code == 200
@@ -481,7 +639,15 @@ def test_now_route_returns_active_and_next_three_performances() -> None:
     ]
 
 
-def test_now_route_returns_after_hours_when_it_is_active() -> None:
+def test_now_route_rejects_invalid_at_parameter(client: TestClient) -> None:
+    response = client.get("/api/now", params={"at": "tonight"})
+
+    assert response.status_code == 422
+
+
+def test_now_route_returns_after_hours_when_it_is_active(
+    client: TestClient,
+) -> None:
     response = client.get("/api/now", params={"at": "2027-06-12T01:30"})
 
     assert response.status_code == 200

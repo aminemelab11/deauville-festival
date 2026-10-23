@@ -4,7 +4,7 @@ from json import JSONDecodeError
 from pathlib import Path
 from typing import Annotated, Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
@@ -22,8 +22,7 @@ from deauville.festival import (
 )
 from deauville.storage import JsonFileStorage, Storage
 
-app = FastAPI()
-app.state.storage = JsonFileStorage(Path("data/festival.json"))
+router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
@@ -76,7 +75,6 @@ PerformanceRequestBody = Annotated[
 ]
 
 
-@app.exception_handler(FestivalError)
 def festival_error_handler(_: Request, error: FestivalError) -> JSONResponse:
     if isinstance(error, DataError):
         status_code = 500
@@ -91,7 +89,6 @@ def festival_error_handler(_: Request, error: FestivalError) -> JSONResponse:
     return JSONResponse(status_code=status_code, content={"detail": str(error)})
 
 
-@app.exception_handler(OSError)
 def storage_error_handler(_: Request, error: OSError) -> JSONResponse:
     logger.error("Unable to read or write the festival data file: %s", error)
     return JSONResponse(
@@ -100,7 +97,6 @@ def storage_error_handler(_: Request, error: OSError) -> JSONResponse:
     )
 
 
-@app.exception_handler(JSONDecodeError)
 def invalid_data_file_handler(_: Request, error: JSONDecodeError) -> JSONResponse:
     logger.error("The festival data file contains invalid JSON: %s", error.msg)
     return JSONResponse(
@@ -119,13 +115,33 @@ def make_performance(
     )
 
 
-def create_app(storage: Storage | None = None) -> FastAPI:
-    if storage is not None:
-        app.state.storage = storage
-    return app
+def create_app(storage: Storage) -> FastAPI:
+    application = FastAPI()
+    application.state.storage = storage
+    application.add_exception_handler(FestivalError, festival_error_handler)
+    application.add_exception_handler(OSError, storage_error_handler)
+    application.add_exception_handler(JSONDecodeError, invalid_data_file_handler)
+    application.include_router(router)
+
+    web_directory = Path(__file__).parent / "web"
+    admin_directory = web_directory / "admin"
+    if admin_directory.is_dir():
+        application.mount(
+            "/admin",
+            StaticFiles(directory=admin_directory, html=True),
+            name="admin",
+        )
+
+    public_directory = web_directory / "public"
+    if public_directory.is_dir():
+        application.mount(
+            "/", StaticFiles(directory=public_directory, html=True), name="web"
+        )
+
+    return application
 
 
-@app.get("/api/festival")
+@router.get("/api/festival")
 def get_festival(request: Request) -> dict:
     festival = request.app.state.storage.load()
     days = [
@@ -141,20 +157,20 @@ def get_festival(request: Request) -> dict:
     }
 
 
-@app.get("/api/venues")
+@router.get("/api/venues")
 def list_venues(request: Request) -> list[dict]:
     festival = request.app.state.storage.load()
     return [venue.to_view() for venue in festival.venues]
 
 
-@app.get("/api/artists")
+@router.get("/api/artists")
 def list_artists(request: Request) -> list[dict]:
     festival = request.app.state.storage.load()
     artists = sorted(festival.artists, key=lambda artist: artist.slug)
     return [artist.to_view() for artist in artists]
 
 
-@app.get("/api/artists/{artist_slug}")
+@router.get("/api/artists/{artist_slug}")
 def get_artist(request: Request, artist_slug: str) -> dict:
     festival = request.app.state.storage.load()
     artist = festival.get_artist(artist_slug)
@@ -169,7 +185,7 @@ def get_artist(request: Request, artist_slug: str) -> dict:
     return view
 
 
-@app.get("/api/programme")
+@router.get("/api/programme")
 def get_programme(
     request: Request, day: date | None = None, venue: str | None = None
 ) -> list[dict]:
@@ -191,7 +207,7 @@ def get_programme(
     return [performance.to_view() for performance in performances]
 
 
-@app.get("/api/performances/{performance_id}")
+@router.get("/api/performances/{performance_id}")
 def get_performance(request: Request, performance_id: str) -> dict:
     festival = request.app.state.storage.load()
     performance = festival.get_performance(performance_id)
@@ -203,7 +219,7 @@ def get_performance(request: Request, performance_id: str) -> dict:
     return performance.to_view()
 
 
-@app.get("/api/now")
+@router.get("/api/now")
 def get_now(request: Request, at: datetime | None = None) -> dict:
     festival = request.app.state.storage.load()
     moment = at or datetime.now()
@@ -216,7 +232,7 @@ def get_now(request: Request, at: datetime | None = None) -> dict:
     }
 
 
-@app.post("/api/artists", status_code=201)
+@router.post("/api/artists", status_code=201)
 def create_artist(body: ArtistRequest, request: Request) -> dict:
     storage: Storage = request.app.state.storage
     festival = storage.load()
@@ -226,7 +242,7 @@ def create_artist(body: ArtistRequest, request: Request) -> dict:
     return artist.to_view()
 
 
-@app.post("/api/performances", status_code=201)
+@router.post("/api/performances", status_code=201)
 def create_performance(body: PerformanceRequestBody, request: Request) -> dict:
     storage: Storage = request.app.state.storage
     festival = storage.load()
@@ -236,7 +252,7 @@ def create_performance(body: PerformanceRequestBody, request: Request) -> dict:
     return performance.to_view()
 
 
-@app.put("/api/performances/{performance_id}")
+@router.put("/api/performances/{performance_id}")
 def update_performance(
     performance_id: str, body: PerformanceRequestBody, request: Request
 ) -> dict:
@@ -248,7 +264,7 @@ def update_performance(
     return updated.to_view()
 
 
-@app.delete("/api/performances/{performance_id}", status_code=204)
+@router.delete("/api/performances/{performance_id}", status_code=204)
 def delete_performance(performance_id: str, request: Request) -> Response:
     storage: Storage = request.app.state.storage
     festival = storage.load()
@@ -257,7 +273,7 @@ def delete_performance(performance_id: str, request: Request) -> Response:
     return Response(status_code=204)
 
 
-@app.post("/api/performances/{performance_id}/participants", status_code=201)
+@router.post("/api/performances/{performance_id}/participants", status_code=201)
 def create_participant(
     performance_id: str, body: ParticipantRequest, request: Request
 ) -> dict:
@@ -268,15 +284,4 @@ def create_participant(
     return workshop.to_view()
 
 
-web_directory = Path(__file__).parent / "web"
-admin_directory = web_directory / "admin"
-if admin_directory.is_dir():
-    app.mount(
-        "/admin",
-        StaticFiles(directory=admin_directory, html=True),
-        name="admin",
-    )
-
-public_directory = web_directory / "public"
-if public_directory.is_dir():
-    app.mount("/", StaticFiles(directory=public_directory, html=True), name="web")
+app = create_app(JsonFileStorage(Path("data/festival.json")))
